@@ -1347,41 +1347,81 @@ final class Parser(AST) : Lexer
         return a;
     }
 
-    /*********************************************
-     * Give error on redundant/conflicting storage class.
+    /**
+     * Provide an error message if `added` contains storage classes which are
+     * redundant with those in `orig`; otherwise, return the combination.
+     *
+     * Params:
+     *   orig = The already applied storage class.
+     *   added = The new storage class to add to `orig`.
+     *
+     * Returns:
+     *   The combination of both storage classes (`orig | added`).
      */
-    private StorageClass appendStorageClass(StorageClass storageClass, StorageClass stc)
+    private StorageClass appendStorageClass(StorageClass orig, StorageClass added)
     {
-        if ((storageClass & stc) || (storageClass & STC.in_ && stc & (STC.const_ | STC.scope_)) || (stc & STC.in_ && storageClass & (STC.const_ | STC.scope_)))
+        if (orig & added)
         {
             OutBuffer buf;
-            AST.stcToBuffer(&buf, stc);
+            AST.stcToBuffer(&buf, added);
             error("redundant attribute `%s`", buf.peekChars());
-            return storageClass | stc;
+            return orig | added;
         }
 
-        storageClass |= stc;
+        const Redundant = (STC.const_ | STC.scope_ |
+                           (global.params.previewIn ? STC.ref_ : 0));
+        orig |= added;
 
-        if (stc & (STC.const_ | STC.immutable_ | STC.manifest))
+        if ((orig & STC.in_) && (added & Redundant))
         {
-            StorageClass u = storageClass & (STC.const_ | STC.immutable_ | STC.manifest);
+            if (added & STC.const_)
+                error("attribute `const` is redundant with previously-applied `in`");
+            else if (global.params.previewIn)
+            {
+                error("attribute `%s` is redundant with previously-applied `in`",
+                      (orig & STC.scope_) ? "scope".ptr : "ref".ptr);
+            }
+            else
+                error("attribute `scope` cannot be applied with `in`, use `-preview=in` instead");
+            return orig;
+        }
+
+        if ((added & STC.in_) && (orig & Redundant))
+        {
+            if (orig & STC.const_)
+                error("attribute `in` cannot be added after `const`: remove `const`");
+            else if (global.params.previewIn)
+            {
+                // Windows `printf` does not support `%1$s`
+                const(char*) stc_str = (orig & STC.scope_) ? "scope".ptr : "ref".ptr;
+                error("attribute `in` cannot be added after `%s`: remove `%s`",
+                      stc_str, stc_str);
+            }
+            else
+                error("attribute `in` cannot be added after `scope`: remove `scope` and use `-preview=in`");
+            return orig;
+        }
+
+        if (added & (STC.const_ | STC.immutable_ | STC.manifest))
+        {
+            StorageClass u = orig & (STC.const_ | STC.immutable_ | STC.manifest);
             if (u & (u - 1))
                 error("conflicting attribute `%s`", Token.toChars(token.value));
         }
-        if (stc & (STC.gshared | STC.shared_ | STC.tls))
+        if (added & (STC.gshared | STC.shared_ | STC.tls))
         {
-            StorageClass u = storageClass & (STC.gshared | STC.shared_ | STC.tls);
+            StorageClass u = orig & (STC.gshared | STC.shared_ | STC.tls);
             if (u & (u - 1))
                 error("conflicting attribute `%s`", Token.toChars(token.value));
         }
-        if (stc & STC.safeGroup)
+        if (added & STC.safeGroup)
         {
-            StorageClass u = storageClass & STC.safeGroup;
+            StorageClass u = orig & STC.safeGroup;
             if (u & (u - 1))
                 error("conflicting attribute `@%s`", token.toChars());
         }
 
-        return storageClass;
+        return orig;
     }
 
     /***********************************************
@@ -2252,6 +2292,9 @@ final class Parser(AST) : Lexer
                                 if (token.value != TOK.comma)
                                     break;
                                 nextToken();
+                                // Allow trailing commas as done for argument lists, arrays, ...
+                                if (token.value == TOK.rightParentheses)
+                                    break;
                             }
                         }
                     }
@@ -2469,11 +2512,10 @@ final class Parser(AST) : Lexer
 
         /* Just a regular constructor
          */
-        AST.VarArg varargs;
-        AST.Parameters* parameters = parseParameters(&varargs);
+        auto parameterList = parseParameterList(null);
         stc = parsePostfix(stc, &udas);
 
-        if (varargs != AST.VarArg.none || AST.Parameter.dim(parameters) != 0)
+        if (parameterList.varargs != AST.VarArg.none || AST.Parameter.dim(parameterList.parameters) != 0)
         {
             if (stc & STC.static_)
                 error(loc, "constructor cannot be static");
@@ -2488,7 +2530,7 @@ final class Parser(AST) : Lexer
 
         AST.Expression constraint = tpl ? parseConstraint() : null;
 
-        AST.Type tf = new AST.TypeFunction(AST.ParameterList(parameters, varargs), null, linkage, stc); // RetrunType -> auto
+        AST.Type tf = new AST.TypeFunction(parameterList, null, linkage, stc); // RetrunType -> auto
         tf = tf.addSTC(stc);
 
         auto f = new AST.CtorDeclaration(loc, Loc.initial, stc, tf);
@@ -2793,9 +2835,8 @@ final class Parser(AST) : Lexer
 
         nextToken();
 
-        AST.VarArg varargs;
-        AST.Parameters* parameters = parseParameters(&varargs);
-        auto f = new AST.NewDeclaration(loc, Loc.initial, stc, parameters, varargs);
+        auto parameterList = parseParameterList(null);
+        auto f = new AST.NewDeclaration(loc, Loc.initial, stc, parameterList);
         AST.Dsymbol s = parseContracts(f);
         return s;
     }
@@ -2803,11 +2844,15 @@ final class Parser(AST) : Lexer
     /**********************************************
      * Parse parameter list.
      */
-    private AST.Parameters* parseParameters(AST.VarArg* pvarargs, AST.TemplateParameters** tpl = null)
+    private AST.ParameterList parseParameterList(AST.TemplateParameters** tpl)
     {
         auto parameters = new AST.Parameters();
         AST.VarArg varargs = AST.VarArg.none;
         int hasdefault = 0;
+        StorageClass varargsStc;
+
+        // Attributes allowed for ...
+        enum VarArgsStc = STC.const_ | STC.immutable_ | STC.shared_ | STC.scope_ | STC.return_;
 
         check(TOK.leftParentheses);
         while (1)
@@ -2830,6 +2875,14 @@ final class Parser(AST) : Lexer
 
                 case TOK.dotDotDot:
                     varargs = AST.VarArg.variadic;
+                    varargsStc = storageClass;
+                    if (varargsStc & ~VarArgsStc)
+                    {
+                        OutBuffer buf;
+                        AST.stcToBuffer(&buf, varargsStc & ~VarArgsStc);
+                        error("variadic parameter cannot have attributes `%s`", buf.peekChars());
+                        varargsStc &= VarArgsStc;
+                    }
                     nextToken();
                     break;
 
@@ -2876,14 +2929,7 @@ final class Parser(AST) : Lexer
                         // Don't call nextToken again.
                     }
                 case TOK.in_:
-                    if (global.params.inMeansScopeConst)
-                    {
-                        // `in` now means `const scope` as originally intented
-                        stc = STC.const_ | STC.scope_;
-                    }
-                    else
-                        stc = STC.in_;
-
+                    stc = STC.in_;
                     goto L2;
 
                 case TOK.out_:
@@ -2956,7 +3002,7 @@ final class Parser(AST) : Lexer
                     }
                 default:
                     {
-                        stc = storageClass & (STC.in_ | STC.out_ | STC.ref_ | STC.lazy_);
+                        stc = storageClass & (STC.IOR | STC.lazy_);
                         // if stc is not a power of 2
                         if (stc & (stc - 1) && !(stc == (STC.in_ | STC.ref_)))
                             error("incompatible parameter storage classes");
@@ -2998,7 +3044,7 @@ final class Parser(AST) : Lexer
                             if (hasdefault)
                                 error("default argument expected for `%s`", ai ? ai.toChars() : at.toChars());
                         }
-                        auto param = new AST.Parameter(storageClass, at, ai, ae, null);
+                        auto param = new AST.Parameter(storageClass | STC.parameter, at, ai, ae, null);
                         if (udas)
                         {
                             auto a = new AST.Dsymbols();
@@ -3048,8 +3094,7 @@ final class Parser(AST) : Lexer
         L1:
         }
         check(TOK.rightParentheses);
-        *pvarargs = varargs;
-        return parameters;
+        return AST.ParameterList(parameters, varargs, varargsStc);
     }
 
     /*************************************
@@ -3210,10 +3255,6 @@ final class Parser(AST) : Lexer
                         error("if type, there must be an initializer");
                 }
 
-                AST.UserAttributeDeclaration uad;
-                if (udas)
-                    uad = new AST.UserAttributeDeclaration(udas, null);
-
                 AST.DeprecatedDeclaration dd;
                 if (deprecationMessage)
                 {
@@ -3221,8 +3262,16 @@ final class Parser(AST) : Lexer
                     stc |= STC.deprecated_;
                 }
 
-                auto em = new AST.EnumMember(loc, ident, value, type, stc, uad, dd);
+                auto em = new AST.EnumMember(loc, ident, value, type, stc, null, dd);
                 e.members.push(em);
+
+                if (udas)
+                {
+                    auto s = new AST.Dsymbols();
+                    s.push(em);
+                    auto uad = new AST.UserAttributeDeclaration(udas, s);
+                    em.userAttribDecl = uad;
+                }
 
                 if (token.value == TOK.rightCurly)
                 {
@@ -3716,8 +3765,8 @@ final class Parser(AST) : Lexer
 
         case TOK.mixin_:
             // https://dlang.org/spec/expression.html#mixin_types
-            nextToken();
             loc = token.loc;
+            nextToken();
             if (token.value != TOK.leftParentheses)
                 error("found `%s` when expecting `%s` following %s", token.toChars(), Token.toChars(TOK.leftParentheses), "`mixin`".ptr);
             auto exps = parseArguments();
@@ -3969,6 +4018,12 @@ final class Parser(AST) : Lexer
                     //printf("it's type[expression]\n");
                     inBrackets++;
                     AST.Expression e = parseAssignExp(); // [ expression ]
+                    if (!e)
+                    {
+                        inBrackets--;
+                        check(TOK.rightBracket);
+                        continue;
+                    }
                     if (token.value == TOK.slice)
                     {
                         nextToken();
@@ -3993,11 +4048,10 @@ final class Parser(AST) : Lexer
                     TOK save = token.value;
                     nextToken();
 
-                    AST.VarArg varargs;
-                    AST.Parameters* parameters = parseParameters(&varargs);
+                    auto parameterList = parseParameterList(null);
 
                     StorageClass stc = parsePostfix(STC.undefined_, null);
-                    auto tf = new AST.TypeFunction(AST.ParameterList(parameters, varargs), t, linkage, stc);
+                    auto tf = new AST.TypeFunction(parameterList, t, linkage, stc);
                     if (stc & (STC.const_ | STC.immutable_ | STC.shared_ | STC.wild | STC.return_))
                     {
                         if (save == TOK.function_)
@@ -4151,15 +4205,14 @@ final class Parser(AST) : Lexer
                         }
                     }
 
-                    AST.VarArg varargs;
-                    AST.Parameters* parameters = parseParameters(&varargs);
+                    auto parameterList = parseParameterList(null);
 
                     /* Parse const/immutable/shared/inout/nothrow/pure/return postfix
                      */
                     // merge prefix storage classes
                     StorageClass stc = parsePostfix(storageClass, pudas);
 
-                    AST.Type tf = new AST.TypeFunction(AST.ParameterList(parameters, varargs), t, linkage, stc);
+                    AST.Type tf = new AST.TypeFunction(parameterList, t, linkage, stc);
                     tf = tf.addSTC(stc);
                     if (pdisable)
                         *pdisable = stc & STC.disable ? 1 : 0;
@@ -4443,10 +4496,8 @@ final class Parser(AST) : Lexer
                         isBasicType(&tlu) && tlu &&
                         tlu.value == TOK.leftParentheses)
                     {
-                        AST.VarArg vargs;
                         AST.Type tret = parseBasicType();
-                        AST.Parameters* prms = parseParameters(&vargs);
-                        AST.ParameterList pl = AST.ParameterList(prms, vargs);
+                        auto parameterList = parseParameterList(null);
 
                         parseAttributes();
                         if (udas)
@@ -4454,7 +4505,7 @@ final class Parser(AST) : Lexer
 
                         attributesAppended = true;
                         storage_class = appendStorageClass(storage_class, funcStc);
-                        AST.Type tf = new AST.TypeFunction(pl, tret, link, storage_class);
+                        AST.Type tf = new AST.TypeFunction(parameterList, tret, link, storage_class);
                         v = new AST.AliasDeclaration(loc, ident, tf);
                     }
                     else if (token.value == TOK.function_ ||
@@ -4500,11 +4551,31 @@ final class Parser(AST) : Lexer
                     else
                     {
                         parseAttributes();
-                        // StorageClasses type
+                        // type
                         if (udas)
                             error("user-defined attributes not allowed for `%s` declarations", Token.toChars(tok));
 
                         auto t = parseType();
+
+                        // Disallow meaningless storage classes on type aliases
+                        if (storage_class)
+                        {
+                            // Don't raise errors for STC that are part of a function/delegate type, e.g.
+                            // `alias F = ref pure nothrow @nogc @safe int function();`
+                            auto tp = t.isTypePointer;
+                            const isFuncType = (tp && tp.next.isTypeFunction) || t.isTypeDelegate;
+                            const remStc = isFuncType ? (storage_class & ~STC.FUNCATTR) : storage_class;
+
+                            if (remStc)
+                            {
+                                OutBuffer buf;
+                                AST.stcToBuffer(&buf, remStc);
+                                // @@@DEPRECATED_2.093@@@
+                                // Deprecated in 2020-07, can be made an error in 2.103
+                                deprecation("storage class `%s` has no effect in type aliases", buf.peekChars());
+                            }
+                        }
+
                         v = new AST.AliasDeclaration(loc, ident, t);
                     }
                     if (!attributesAppended)
@@ -4878,8 +4949,7 @@ final class Parser(AST) : Lexer
     {
         const loc = token.loc;
         AST.TemplateParameters* tpl = null;
-        AST.Parameters* parameters = null;
-        AST.VarArg varargs = AST.VarArg.none;
+        AST.ParameterList parameterList;
         AST.Type tret = null;
         StorageClass stc = 0;
         TOK save = TOK.reserved;
@@ -4930,7 +5000,7 @@ final class Parser(AST) : Lexer
             {
                 // (parameters) => expression
                 // (parameters) { statements... }
-                parameters = parseParameters(&varargs, &tpl);
+                parameterList = parseParameterList(&tpl);
                 stc = parsePostfix(stc, null);
                 if (StorageClass modStc = stc & STC.TYPECTOR)
                 {
@@ -4952,10 +5022,10 @@ final class Parser(AST) : Lexer
         case TOK.identifier:
             {
                 // identifier => expression
-                parameters = new AST.Parameters();
+                parameterList.parameters = new AST.Parameters();
                 Identifier id = Identifier.generateId("__T");
                 AST.Type t = new AST.TypeIdentifier(loc, id);
-                parameters.push(new AST.Parameter(0, t, token.ident, null, null));
+                parameterList.parameters.push(new AST.Parameter(STC.parameter, t, token.ident, null, null));
 
                 tpl = new AST.TemplateParameters();
                 AST.TemplateParameter tp = new AST.TemplateTypeParameter(loc, id, null, null);
@@ -4968,7 +5038,7 @@ final class Parser(AST) : Lexer
             assert(0);
         }
 
-        auto tf = new AST.TypeFunction(AST.ParameterList(parameters, varargs), tret, linkage, stc);
+        auto tf = new AST.TypeFunction(parameterList, tret, linkage, stc);
         tf = cast(AST.TypeFunction)tf.addSTC(stc);
         auto fd = new AST.FuncLiteralDeclaration(loc, Loc.initial, tf, save, null);
 
@@ -5513,7 +5583,18 @@ final class Parser(AST) : Lexer
         Lexp:
             {
                 AST.Expression exp = parseExpression();
-                check(TOK.semicolon, "statement");
+                /* https://issues.dlang.org/show_bug.cgi?id=15103
+                 * Improve declaration / initialization syntax error message
+                 * Error: found 'foo' when expecting ';' following statement
+                 * becomes Error: found `(` when expecting `;` or `=`, did you mean `Foo foo = 42`?
+                 */
+                if (token.value == TOK.identifier && exp.op == TOK.identifier)
+                {
+                    error("found `%s` when expecting `;` or `=`, did you mean `%s %s = %s`?", peek(&token).toChars(), exp.toChars(), token.toChars(), peek(peek(&token)).toChars());
+                    nextToken();
+                }
+                else
+                    check(TOK.semicolon, "statement");
                 s = new AST.ExpStatement(loc, exp);
                 break;
             }
@@ -6443,6 +6524,7 @@ final class Parser(AST) : Lexer
         Token* t;
         int braces;
         int brackets;
+        int parens;
 
         switch (token.value)
         {
@@ -6475,6 +6557,18 @@ final class Parser(AST) : Lexer
             {
                 switch (t.value)
                 {
+                case TOK.leftParentheses:
+                    parens++;
+                    continue;
+                case TOK.rightParentheses:
+                    parens--;
+                    continue;
+                // https://issues.dlang.org/show_bug.cgi?id=21163
+                // lambda params can have the `scope` storage class, e.g
+                // `S s = { (scope Type Id){} }`
+                case TOK.scope_:
+                    if (!parens) goto case;
+                    continue;
                 /* Look for a semicolon or keyword of statements which don't
                  * require a semicolon (typically containing BlockStatement).
                  * Tokens like "else", "catch", etc. are omitted where the
@@ -6487,7 +6581,6 @@ final class Parser(AST) : Lexer
                 case TOK.if_:
                 case TOK.interface_:
                 case TOK.pragma_:
-                case TOK.scope_:
                 case TOK.semicolon:
                 case TOK.struct_:
                 case TOK.switch_:
@@ -7252,7 +7345,7 @@ final class Parser(AST) : Lexer
 
     private bool isParameters(Token** pt)
     {
-        // This code parallels parseParameters()
+        // This code parallels parseParameterList()
         Token* t = *pt;
 
         //printf("isParameters()\n");
@@ -7266,6 +7359,15 @@ final class Parser(AST) : Lexer
             switch (t.value)
             {
             case TOK.rightParentheses:
+                break;
+
+            case TOK.at:
+                Token* pastAttr;
+                if (skipAttributes(t, &pastAttr))
+                {
+                    t = pastAttr;
+                    goto default;
+                }
                 break;
 
             case TOK.dotDotDot:
@@ -7686,12 +7788,12 @@ final class Parser(AST) : Lexer
             break;
 
         case TOK.int32Literal:
-            e = new AST.IntegerExp(loc, cast(d_int32)token.intvalue, AST.Type.tint32);
+            e = new AST.IntegerExp(loc, token.intvalue, AST.Type.tint32);
             nextToken();
             break;
 
         case TOK.uns32Literal:
-            e = new AST.IntegerExp(loc, cast(d_uns32)token.unsvalue, AST.Type.tuns32);
+            e = new AST.IntegerExp(loc, token.unsvalue, AST.Type.tuns32);
             nextToken();
             break;
 
@@ -7789,17 +7891,17 @@ final class Parser(AST) : Lexer
             break;
 
         case TOK.charLiteral:
-            e = new AST.IntegerExp(loc, cast(d_uns8)token.unsvalue, AST.Type.tchar);
+            e = new AST.IntegerExp(loc, token.unsvalue, AST.Type.tchar);
             nextToken();
             break;
 
         case TOK.wcharLiteral:
-            e = new AST.IntegerExp(loc, cast(d_uns16)token.unsvalue, AST.Type.twchar);
+            e = new AST.IntegerExp(loc, token.unsvalue, AST.Type.twchar);
             nextToken();
             break;
 
         case TOK.dcharLiteral:
-            e = new AST.IntegerExp(loc, cast(d_uns32)token.unsvalue, AST.Type.tdchar);
+            e = new AST.IntegerExp(loc, token.unsvalue, AST.Type.tdchar);
             nextToken();
             break;
 
@@ -7823,8 +7925,10 @@ final class Parser(AST) : Lexer
                             postfix = token.postfix;
                         }
 
-                        error("Implicit string concatenation is deprecated, use %s ~ %s instead",
-                                    prev.toChars(), token.toChars());
+                        error("Implicit string concatenation is error-prone and disallowed in D");
+                        errorSupplemental(token.loc, "Use the explicit syntax instead " ~
+                             "(concatenating literals is `@nogc`): %s ~ %s",
+                             prev.toChars(), token.toChars());
 
                         const len1 = len;
                         const len2 = token.len;

@@ -68,6 +68,8 @@ struct Target
     // Objective-C ABI
     TargetObjC objc;
 
+    DString architectureName;    // name of the platform architecture (e.g. X86_64)
+
     template <typename T>
     struct FPTypeProperties
     {
@@ -83,10 +85,6 @@ struct Target
         d_int64 min_exp;
         d_int64 max_10_exp;
         d_int64 min_10_exp;
-
-#if IN_LLVM
-        void initialize();
-#endif
     };
 
     FPTypeProperties<float> FloatProperties;
@@ -94,7 +92,11 @@ struct Target
     FPTypeProperties<real_t> RealProperties;
 
 private:
-    Type *va_list;
+    Type *tvalist;
+
+#if IN_LLVM
+    void initFPTypeProperties();
+#endif
 
 public:
     void _init(const Param& params);
@@ -114,6 +116,7 @@ public:
     TypeTuple *toArgTypes(Type *t);
     bool isReturnOnStack(TypeFunction *tf, bool needsThis);
     d_uns64 parameterSize(const Loc& loc, Type *t);
+    void applyInRefParams(TypeFunction *tf);
     Expression *getTargetInfo(const char* name, const Loc& loc);
 };
 

@@ -16,16 +16,18 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSwitch.h"
 
+#if LDC_LLVM_VER < 1100
 namespace llvm {
 // Auto-generate:
 // Attribute::AttrKind getAttrKindFromName(StringRef AttrName) { ... }
 #define GET_ATTR_KIND_FROM_NAME
-#if LDC_LLVM_VER >= 400 && LDC_LLVM_VER < 700
+#if LDC_LLVM_VER < 700
 #include "llvm/IR/Attributes.gen"
 #else
 #include "llvm/IR/Attributes.inc"
 #endif
 }
+#endif
 
 namespace {
 
@@ -195,14 +197,7 @@ void applyAttrAllocSize(StructLiteralExp *sle, IrFunction *irFunc) {
 
   llvm::Function *func = irFunc->getLLVMFunc();
 
-#if LDC_LLVM_VER >= 500
-  func->addAttributes(LLAttributeSet::FunctionIndex, builder);
-#else
-  func->addAttributes(LLAttributeSet::FunctionIndex,
-                      LLAttributeSet::get(func->getContext(),
-                                          LLAttributeSet::FunctionIndex,
-                                          builder));
-#endif
+  func->addAttributes(LLAttributeList::FunctionIndex, builder);
 }
 
 // @llvmAttr("key", "value")
@@ -212,7 +207,11 @@ void applyAttrLLVMAttr(StructLiteralExp *sle, llvm::AttrBuilder &attrs) {
   llvm::StringRef key = getStringElem(sle, 0);
   llvm::StringRef value = getStringElem(sle, 1);
   if (value.empty()) {
+#if LDC_LLVM_VER >= 1100
+    const auto kind = llvm::Attribute::getAttrKindFromName(key);
+#else
     const auto kind = llvm::getAttrKindFromName(key);
+#endif
     if (kind != llvm::Attribute::None) {
       attrs.addAttribute(kind);
     } else {
@@ -231,19 +230,9 @@ void applyAttrLLVMFastMathFlag(StructLiteralExp *sle, IrFunction *irFunc) {
   if (value == "clear") {
     irFunc->FMF.clear();
   } else if (value == "fast") {
-#if LDC_LLVM_VER >= 600
     irFunc->FMF.setFast();
-#else
-    irFunc->FMF.setUnsafeAlgebra();
-#endif
   } else if (value == "contract") {
-#if LDC_LLVM_VER >= 500
     irFunc->FMF.setAllowContract(true);
-#else
-    sle->warning("ignoring parameter `contract` for `@ldc.attributes.%s`: "
-                 "LDC needs to be built against LLVM 5.0+ for support",
-                 sle->sd->ident->toChars());
-#endif
   } else if (value == "nnan") {
     irFunc->FMF.setNoNaNs();
   } else if (value == "ninf") {
@@ -425,13 +414,7 @@ void applyFuncDeclUDAs(FuncDeclaration *decl, IrFunction *irFunc) {
       } else if (ident == Id::udaLLVMAttr) {
         llvm::AttrBuilder attrs;
         applyAttrLLVMAttr(sle, attrs);
-#if LDC_LLVM_VER >= 500
-        func->addAttributes(LLAttributeSet::FunctionIndex, attrs);
-#else
-        AttrSet attrSet;
-        attrSet.addToFunction(attrs);
-        func->addAttributes(LLAttributeSet::FunctionIndex, attrSet);
-#endif
+        func->addAttributes(LLAttributeList::FunctionIndex, attrs);
       } else if (ident == Id::udaLLVMFastMathFlag) {
         applyAttrLLVMFastMathFlag(sle, irFunc);
       } else if (ident == Id::udaOptStrategy) {

@@ -92,7 +92,6 @@ DValue *DtoNewClass(Loc &loc, TypeClass *tc, NewExp *newexp) {
   }
   // custom allocator
   else if (newexp->allocator) {
-    DtoResolveFunction(newexp->allocator);
     DFuncValue dfn(newexp->allocator, DtoCallee(newexp->allocator));
     DValue *res = DtoCallFunction(newexp->loc, nullptr, &dfn, newexp->newargs);
     mem = DtoBitCast(DtoRVal(res), DtoType(tc), ".newclass_custom");
@@ -104,10 +103,8 @@ DValue *DtoNewClass(Loc &loc, TypeClass *tc, NewExp *newexp) {
         loc, gIR->module, useEHAlloc ? "_d_newThrowable" : "_d_allocclass");
     LLConstant *ci = DtoBitCast(getIrAggr(tc->sym)->getClassInfoSymbol(),
                                 DtoType(getClassInfoType()));
-    mem = gIR->CreateCallOrInvoke(fn, ci,
-                                  useEHAlloc ? ".newthrowable_alloc"
-                                             : ".newclass_gc_alloc")
-              .getInstruction();
+    mem = gIR->CreateCallOrInvoke(
+        fn, ci, useEHAlloc ? ".newthrowable_alloc" : ".newclass_gc_alloc");
     mem = DtoBitCast(mem, DtoType(tc),
                      useEHAlloc ? ".newthrowable" : ".newclass_gc");
     doInit = !useEHAlloc;
@@ -141,7 +138,6 @@ DValue *DtoNewClass(Loc &loc, TypeClass *tc, NewExp *newexp) {
 
     Logger::println("Calling constructor");
     assert(newexp->arguments != NULL);
-    DtoResolveFunction(newexp->member);
     DFuncValue dfn(newexp->member, DtoCallee(newexp->member), mem);
     // ignore ctor return value (C++ ctors on Posix may not return `this`)
     DtoCallFunction(newexp->loc, tc, &dfn, newexp->arguments);
@@ -223,11 +219,11 @@ void DtoFinalizeScopeClass(Loc &loc, LLValue *inst, bool hasDtor) {
                           getNullValue(monitor->getType()), ".hasMonitor");
   llvm::BranchInst::Create(ifbb, endbb, hasMonitor, gIR->scopebb());
 
-  gIR->scope() = IRScope(ifbb);
+  gIR->ir->SetInsertPoint(ifbb);
   DtoFinalizeClass(loc, inst);
   gIR->ir->CreateBr(endbb);
 
-  gIR->scope() = IRScope(endbb);
+  gIR->ir->SetInsertPoint(endbb);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -377,7 +373,7 @@ DValue *DtoDynamicCastObject(Loc &loc, DValue *val, Type *_to) {
   assert(funcTy->getParamType(1) == cinfo->getType());
 
   // call it
-  LLValue *ret = gIR->CreateCallOrInvoke(func, obj, cinfo).getInstruction();
+  LLValue *ret = gIR->CreateCallOrInvoke(func, obj, cinfo);
 
   // cast return value
   ret = DtoBitCast(ret, DtoType(_to));
@@ -411,7 +407,7 @@ DValue *DtoDynamicCastInterface(Loc &loc, DValue *val, Type *_to) {
   cinfo = DtoBitCast(cinfo, funcTy->getParamType(1));
 
   // call it
-  LLValue *ret = gIR->CreateCallOrInvoke(func, ptr, cinfo).getInstruction();
+  LLValue *ret = gIR->CreateCallOrInvoke(func, ptr, cinfo);
 
   // cast return value
   ret = DtoBitCast(ret, DtoType(_to));
@@ -421,8 +417,7 @@ DValue *DtoDynamicCastInterface(Loc &loc, DValue *val, Type *_to) {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-LLValue *DtoVirtualFunctionPointer(DValue *inst, FuncDeclaration *fdecl,
-                                   const char *name) {
+LLValue *DtoVirtualFunctionPointer(DValue *inst, FuncDeclaration *fdecl) {
   // sanity checks
   assert(fdecl->isVirtual());
   assert(!fdecl->isFinalFunc());
@@ -442,8 +437,8 @@ LLValue *DtoVirtualFunctionPointer(DValue *inst, FuncDeclaration *fdecl,
   // load vtbl ptr
   funcval = DtoLoad(funcval);
   // index vtbl
-  std::string vtblname = name;
-  vtblname.append("@vtbl");
+  const std::string name = fdecl->toChars();
+  const auto vtblname = name + "@vtbl";
   funcval = DtoGEP(funcval, 0, fdecl->vtblIndex, vtblname.c_str());
   // load opaque pointer
   funcval = DtoAlignedLoad(funcval);

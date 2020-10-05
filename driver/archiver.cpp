@@ -18,15 +18,13 @@
 #include "llvm/Object/MachO.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/Errc.h"
+#if LDC_LLVM_VER >= 1100
+#include "llvm/Support/Host.h"
+#endif
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
-#include <cstring>
-
-#if LDC_LLVM_VER >= 500
 #include "llvm/ToolDrivers/llvm-lib/LibDriver.h"
-#else
-#include "llvm/LibDriver/LibDriver.h"
-#endif
+#include <cstring>
 
 using namespace llvm;
 
@@ -70,10 +68,8 @@ int addMember(std::vector<NewArchiveMember> &Members, StringRef FileName,
       NewArchiveMember::getFile(FileName, Deterministic);
   failIfError(NMOrErr.takeError(), FileName);
 
-#if LDC_LLVM_VER >= 500
   // Use the basename of the object path for the member name.
   NMOrErr->MemberName = sys::path::filename(NMOrErr->MemberName);
-#endif
 
   if (Pos == -1)
     Members.push_back(std::move(*NMOrErr));
@@ -106,11 +102,7 @@ int computeNewArchiveMembers(object::Archive *OldArchive,
     Error Err = Error::success();
     for (auto &Child : OldArchive->children(Err)) {
       auto NameOrErr = Child.getName();
-#if LDC_LLVM_VER < 400
-      failIfError(NameOrErr.getError(), "");
-#else
       failIfError(NameOrErr.takeError(), "");
-#endif
       StringRef Name = NameOrErr.get();
 
       auto MemberI = find_if(Members, [Name](StringRef Path) {
@@ -146,11 +138,7 @@ int computeNewArchiveMembers(object::Archive *OldArchive,
 
 object::Archive::Kind getDefaultForHost() {
   return Triple(sys::getProcessTriple()).isOSDarwin()
-#if LDC_LLVM_VER >= 500
              ? object::Archive::K_DARWIN
-#else
-             ? object::Archive::K_BSD
-#endif
              : object::Archive::K_GNU;
 }
 
@@ -160,11 +148,7 @@ object::Archive::Kind getKindFromMember(const NewArchiveMember &Member) {
 
   if (OptionalObject) {
     return isa<object::MachOObjectFile>(**OptionalObject)
-#if LDC_LLVM_VER >= 500
                ? object::Archive::K_DARWIN
-#else
-               ? object::Archive::K_BSD
-#endif
                : object::Archive::K_GNU;
   }
 
@@ -191,11 +175,7 @@ int performWriteOperation(object::Archive *OldArchive,
       writeArchive(ArchiveName, NewMembers, Symtab, Kind, Deterministic, Thin,
                    std::move(OldArchiveBuf));
 
-#if LDC_LLVM_VER >= 600
   failIfError(std::move(Result), ("error writing '" + ArchiveName + "'").str());
-#else
-  failIfError(Result.second, ("error writing '" + ArchiveName + "'").str());
-#endif
 
   return 0;
 }

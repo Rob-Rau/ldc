@@ -180,7 +180,7 @@ public:
     Loc getLoc();
     const char *locToChars();
     bool equals(const RootObject *o) const;
-    virtual bool isAnonymous();
+    bool isAnonymous() const;
     void error(const Loc &loc, const char *format, ...);
     void error(const char *format, ...);
     void deprecation(const Loc &loc, const char *format, ...);
@@ -273,6 +273,8 @@ public:
     virtual UnitTestDeclaration *isUnitTestDeclaration() { return NULL; }
     virtual NewDeclaration *isNewDeclaration() { return NULL; }
     virtual VarDeclaration *isVarDeclaration() { return NULL; }
+    virtual VersionSymbol *isVersionSymbol() { return NULL; }
+    virtual DebugSymbol *isDebugSymbol() { return NULL; }
     virtual ClassDeclaration *isClassDeclaration() { return NULL; }
     virtual StructDeclaration *isStructDeclaration() { return NULL; }
     virtual UnionDeclaration *isUnionDeclaration() { return NULL; }
@@ -342,10 +344,9 @@ public:
 
 class ArrayScopeSymbol : public ScopeDsymbol
 {
+private:
+    RootObject *arrayContent;
 public:
-    Expression *exp;    // IndexExp or SliceExp
-    TypeTuple *type;    // for tuple[length]
-    TupleDeclaration *td;       // for tuples of objects
     Scope *sc;
 
     Dsymbol *search(const Loc &loc, Identifier *ident, int flags = IgnoreNone);

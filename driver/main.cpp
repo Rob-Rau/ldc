@@ -50,6 +50,7 @@
 #include "gen/passes/Passes.h"
 #include "gen/runtime.h"
 #include "gen/uda.h"
+#include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/LinkAllIR.h"
@@ -66,12 +67,6 @@
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
-
-#if LDC_LLVM_VER >= 600
-#include "llvm/CodeGen/TargetSubtargetInfo.h"
-#else
-#include "llvm/Target/TargetSubtargetInfo.h"
-#endif
 
 #if _WIN32
 #include "llvm/Support/ConvertUTF.h"
@@ -97,6 +92,8 @@ static cl::opt<bool> enableGC(
     "lowmem", cl::ZeroOrMore,
     cl::desc("Enable the garbage collector for the LDC front-end. This reduces "
              "the compiler memory requirements but increases compile times."));
+
+namespace {
 
 // This function exits the program.
 void printVersion(llvm::raw_ostream &OS) {
@@ -125,22 +122,10 @@ void printVersion(llvm::raw_ostream &OS) {
   // redirecting stdout to a file.
   OS.flush();
 
-  llvm::TargetRegistry::printRegisteredTargetsForVersion(
-#if LDC_LLVM_VER >= 600
-      OS
-#endif
-  );
+  llvm::TargetRegistry::printRegisteredTargetsForVersion(OS);
 
   exit(EXIT_SUCCESS);
 }
-
-// This function exits the program.
-void printVersionStdout() {
-  printVersion(llvm::outs());
-  assert(false);
-}
-
-namespace {
 
 // Helper function to handle -d-debug=* and -d-version=*
 void processVersions(std::vector<std::string> &list, const char *type,
@@ -284,11 +269,7 @@ void parseCommandLine(Strings &sourceFiles) {
   // finalize by expanding response files specified in config file
   args::expandResponseFiles(allArguments);
 
-#if LDC_LLVM_VER >= 600
   cl::SetVersionPrinter(&printVersion);
-#else
-  cl::SetVersionPrinter(&printVersionStdout);
-#endif
 
   opts::hideLLVMOptions();
   opts::createClashingOptions();
@@ -368,8 +349,10 @@ void parseCommandLine(Strings &sourceFiles) {
 
   global.params.cxxhdrdir = opts::fromPathString(cxxHdrDir);
   global.params.cxxhdrname = opts::fromPathString(cxxHdrFile);
-  global.params.doCxxHdrGeneration |=
-      global.params.cxxhdrdir.length || global.params.cxxhdrname.length;
+  if (global.params.doCxxHdrGeneration == CxxHeaderMode::none &&
+      (global.params.cxxhdrdir.length || global.params.cxxhdrname.length)) {
+    global.params.doCxxHdrGeneration = CxxHeaderMode::silent;
+  }
 
   global.params.mixinFile = opts::fromPathString(mixinFile).ptr;
 
@@ -410,11 +393,9 @@ void parseCommandLine(Strings &sourceFiles) {
   if (includeImports)
     global.params.oneobj = true;
 
-#if LDC_LLVM_VER >= 400
   if (saveOptimizationRecord.getNumOccurrences() > 0) {
     global.params.outputSourceLocations = true;
   }
-#endif
 
   opts::initializeSanitizerOptionsFromCmdline();
 
@@ -447,8 +428,6 @@ void parseCommandLine(Strings &sourceFiles) {
   global.params.output_ll = opts::output_ll ? OUTPUTFLAGset : OUTPUTFLAGno;
   global.params.output_mlir = opts::output_mlir ? OUTPUTFLAGset : OUTPUTFLAGno;
   global.params.output_s = opts::output_s ? OUTPUTFLAGset : OUTPUTFLAGno;
-
-  global.params.cov = (global.params.covPercent <= 100);
 
   templateLinkage = opts::linkonceTemplates ? LLGlobalValue::LinkOnceODRLinkage
                                             : LLGlobalValue::WeakODRLinkage;
@@ -551,11 +530,7 @@ void initializePasses() {
   initializeTarget(Registry);
 
 // Initialize passes not included above
-#if LDC_LLVM_VER >= 400
   initializeRewriteSymbolsLegacyPassPass(Registry);
-#else
-  initializeRewriteSymbolsPass(Registry);
-#endif
   initializeSjLjEHPreparePass(Registry);
 }
 
@@ -684,14 +659,12 @@ void registerPredefinedTargetVersions() {
   case llvm::Triple::msp430:
     VersionCondition::addPredefinedGlobalIdent("MSP430");
     break;
-#if LDC_LLVM_VER >= 400
   case llvm::Triple::riscv32:
     VersionCondition::addPredefinedGlobalIdent("RISCV32");
     break;
   case llvm::Triple::riscv64:
     VersionCondition::addPredefinedGlobalIdent("RISCV64");
     break;
-#endif
   case llvm::Triple::sparc:
     // FIXME: Detect SPARC v8+ (SPARC_V8Plus).
     VersionCondition::addPredefinedGlobalIdent("SPARC");
@@ -988,8 +961,6 @@ int cppmain() {
   exe_path::initialize(allArguments[0]);
 
   global._init();
-  // global.version includes the terminating null
-  global.version = {strlen(ldc::dmd_version) + 1, ldc::dmd_version};
   global.ldc_version = {strlen(ldc::ldc_version), ldc::ldc_version};
   global.llvm_version = {strlen(ldc::llvm_version), ldc::llvm_version};
 
@@ -1070,6 +1041,11 @@ int cppmain() {
     global.params.mscoff = triple->isKnownWindowsMSVCEnvironment();
     if (global.params.mscoff)
       global.obj_ext = {3, "obj"};
+  }
+
+  // -gdwarf implies -g if not specified explicitly
+  if (opts::emitDwarfDebugInfo && global.params.symdebug == 0) {
+    global.params.symdebug = 1;
   }
 
   // allocate the target abi

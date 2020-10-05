@@ -56,13 +56,13 @@ steps:
     :: Download & extract LDC-flavoured LLVM
     set ASSERTS_SUFFIX=
     if not "%BUILD_SOURCEBRANCH:~0,10%" == "refs/tags/" ( set ASSERTS_SUFFIX=-withAsserts)
-    curl -L -o llvm.7z https://github.com/ldc-developers/llvm-project/releases/download/ldc-v%LLVM_VERSION%/llvm-%LLVM_VERSION%-windows-%ARCH%%ASSERTS_SUFFIX%.7z 2>&1
+    curl -L -o llvm.7z https://github.com/ldc-developers/llvm-project/releases/download/CI/llvm-%LLVM_VERSION%-windows-%ARCH%%ASSERTS_SUFFIX%.7z 2>&1
     mkdir llvm
     cd llvm
     7z x ../llvm.7z > nul
     cd ..
     :: Download & install clang
-    curl -L -o clang.exe http://releases.llvm.org/%CLANG_VERSION%/LLVM-%CLANG_VERSION%-win64.exe 2>&1
+    curl -L -o clang.exe https://github.com/llvm/llvm-project/releases/download/llvmorg-%CLANG_VERSION%/LLVM-%CLANG_VERSION%-win64.exe 2>&1
     clang.exe /S
   displayName: Install prerequisites
 - script: |
@@ -105,7 +105,8 @@ steps:
 - script: |
     cd ..
     set PATH=%CD%\llvm\bin;%PATH%
-    :: strings_cdb has regressed for 32-bit with VS 2019 v16.6.0 (worked fine until v16.5.4)
+    :: strings_cdb has regressed for 32-bit starting with the VS 2019 v16.6.0 Azure Image (worked fine until v16.5.4)
+    :: it also works fine on my box with the same v16.7.2...
     if "%MODEL%" == "32" ( del %BUILD_SOURCESDIRECTORY%\tests\debuginfo\strings_cdb.d)
     call "%VSINSTALLDIR%Common7\Tools\VsDevCmd.bat" -arch=%ARCH%
     cd build
